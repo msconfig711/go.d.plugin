@@ -1,0 +1,37 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "client.go",
+        "keepalive.go",
+    ],
+    importpath = "github.com/netdata/go.d.plugin/modules/vsphere/client",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/web:go_default_library",
+        "@com_github_vmware_govmomi//:go_default_library",
+        "@com_github_vmware_govmomi//performance:go_default_library",
+        "@com_github_vmware_govmomi//session:go_default_library",
+        "@com_github_vmware_govmomi//view:go_default_library",
+        "@com_github_vmware_govmomi//vim25:go_default_library",
+        "@com_github_vmware_govmomi//vim25/methods:go_default_library",
+        "@com_github_vmware_govmomi//vim25/mo:go_default_library",
+        "@com_github_vmware_govmomi//vim25/soap:go_default_library",
+        "@com_github_vmware_govmomi//vim25/types:go_default_library",
+    ],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = ["client_test.go"],
+    embed = [":go_default_library"],
+    deps = [
+        "//pkg/web:go_default_library",
+        "@com_github_stretchr_testify//assert:go_default_library",
+        "@com_github_stretchr_testify//require:go_default_library",
+        "@com_github_vmware_govmomi//simulator:go_default_library",
+        "@com_github_vmware_govmomi//vim25/mo:go_default_library",
+        "@com_github_vmware_govmomi//vim25/types:go_default_library",
+    ],
+)

@@ -1,0 +1,36 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "csv.go",
+        "lastline.go",
+        "ltsv.go",
+        "parser.go",
+        "reader.go",
+        "regexp.go",
+    ],
+    importpath = "github.com/netdata/go.d.plugin/pkg/logs",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_netdata_go_orchestrator//logger:go_default_library",
+        "@com_github_wing924_ltsv//:go_default_library",
+    ],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = [
+        "csv_test.go",
+        "lastline_test.go",
+        "ltsv_test.go",
+        "parser_test.go",
+        "reader_test.go",
+        "regexp_test.go",
+    ],
+    embed = [":go_default_library"],
+    deps = [
+        "@com_github_stretchr_testify//assert:go_default_library",
+        "@com_github_stretchr_testify//require:go_default_library",
+    ],
+)

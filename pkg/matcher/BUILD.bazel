@@ -1,0 +1,38 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "cache.go",
+        "doc.go",
+        "expr.go",
+        "glob.go",
+        "logical.go",
+        "matcher.go",
+        "regexp.go",
+        "simple_patterns.go",
+        "string.go",
+    ],
+    importpath = "github.com/netdata/go.d.plugin/pkg/matcher",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = [
+        "cache_test.go",
+        "doc_test.go",
+        "expr_test.go",
+        "glob_test.go",
+        "logical_test.go",
+        "matcher_test.go",
+        "regexp_test.go",
+        "simple_patterns_test.go",
+        "string_test.go",
+    ],
+    embed = [":go_default_library"],
+    deps = [
+        "@com_github_stretchr_testify//assert:go_default_library",
+        "@com_github_stretchr_testify//require:go_default_library",
+    ],
+)

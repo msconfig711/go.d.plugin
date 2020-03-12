@@ -1,0 +1,23 @@
+load("@io_bazel_rules_docker//container:container.bzl", "container_image")
+load("@io_bazel_rules_docker//container:container.bzl", "container_push")
+
+container_image(
+    name = "go.d.plugin",
+    stamp = True,
+    base = "@centos7//image",
+    files = [
+        "//cmd/godplugin:godplugin",
+    ],
+    cmd = ["tail -f /etc/hosts"],
+)
+
+container_push(
+    name = "push",
+    image = ":go.d.plugin",
+    format = "Docker",
+    #registry = "docker.io/msconfig711",
+    #registry = "docker-registry.i.brainpp.cn",
+    registry = "10.124.137.86:5000",
+    repository = "infra/godplugin",
+    tag = "dev",
+)

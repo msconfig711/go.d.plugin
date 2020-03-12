@@ -1,0 +1,19 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "clusters.go",
+        "datacenters.go",
+        "folders.go",
+        "hosts.go",
+        "resources.go",
+        "vms.go",
+    ],
+    importpath = "github.com/netdata/go.d.plugin/modules/vsphere/resources",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_vmware_govmomi//performance:go_default_library",
+        "@com_github_vmware_govmomi//vim25/types:go_default_library",
+    ],
+)
