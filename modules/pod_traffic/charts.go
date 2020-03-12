@@ -21,10 +21,21 @@ var vfTrafficCharts = Charts{
 		Title: "VF Traffic",
 		Units: "kilobits/s",
 		Type:  module.Area,
-		Fam:   "VF",
+		Fam:   "VFTraffic",
 		Dims: Dims{
 			{ID: "%s-%s-Send", Name: "Send", Algo: module.Incremental, Mul: 8, Div: -1024},
 			{ID: "%s-%s-Recv", Name: "Recv", Algo: module.Incremental, Mul: 8, Div: 1024},
+		},
+	},
+	{
+		ID:    "RDMA-%s-%s", // portName, vfIndex
+		Title: "VF RDMA",
+		Units: "kilobits/s",
+		Type:  module.Area,
+		Fam:   "VFRDMA",
+		Dims: Dims{
+			{ID: "%s-%s-RDMA-Send", Name: "Send", Algo: module.Incremental, Mul: 4 * 8, Div: -1024},
+			{ID: "%s-%s-RDMA-Recv", Name: "Recv", Algo: module.Incremental, Mul: 4 * 8, Div: 1024},
 		},
 	},
 }
@@ -49,10 +60,27 @@ var vfCountCharts = Charts{
 		Title: "VF Count",
 		Units: "num",
 		Type:  module.Line,
-		Fam:   "VF",
+		Fam:   "VFCount",
 	},
 }
 
+// // name: Rdma-portName-vfIndex-Recv
+// func newVFRDMACharts(name string) *Charts {
+// names := strings.Split(name, "-")
+// if len(names) < 3 {
+// return nil
+// }
+// cs := vfRDMACharts.Copy()
+// for _, chart := range *cs {
+// chart.ID = fmt.Sprintf(chart.ID, names[1], names[2])
+// for _, dim := range chart.Dims {
+// dim.ID = fmt.Sprintf(dim.ID, names[1], names[2])
+// }
+// }
+// return cs
+// }
+
+// name: portName-vfIndex-Recv
 func newVFTrafficCharts(name string) *Charts {
 	names := strings.Split(name, "-")
 	if len(names) < 2 {
@@ -68,6 +96,7 @@ func newVFTrafficCharts(name string) *Charts {
 	return cs
 }
 
+// name: portName-Recv
 func newVethPairTrafficCharts(name string) *Charts {
 	names := strings.Split(name, "-")
 	cs := vethTrafficCharts.Copy()

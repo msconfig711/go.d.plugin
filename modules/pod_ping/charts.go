@@ -22,7 +22,7 @@ var pingLossCharts = Charts{
 		Type:  module.Area,
 		Fam:   "%s_%s_Ping", // kind_ip_ping(kind:node, pod)
 		Dims: Dims{
-			{ID: "%s-loss", Name: "Loss Percentage", Div: 100}, // ip
+			{ID: "%s-loss", Name: "Loss Percentage"}, // ip
 		},
 	},
 }

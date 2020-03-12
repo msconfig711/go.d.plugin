@@ -47,24 +47,27 @@ func New() *PodTraffic {
 		logger.Errorln("error when init watcher handler! ", err)
 	}
 	return &PodTraffic{
-		metrics:    make(map[string]int64),
-		mutex:      sync.Mutex{},
-		ethHandler: ethHandler,
-		watcher:    watcher,
-		preMap:     make(map[string]string),
+		metrics:     make(map[string]int64),
+		metricMutex: sync.Mutex{},
+		mapMutex:    sync.Mutex{},
+		ethHandler:  ethHandler,
+		watcher:     watcher,
+		preMap:      make(map[string]string),
 	}
 }
 
 type PodTraffic struct {
 	module.Base // should be embedded by every module
 	metrics     map[string]int64
-	mutex       sync.Mutex
+	metricMutex sync.Mutex
+	mapMutex    sync.Mutex
 
 	ethHandler *ethtool.Ethtool
 	watcher    *fsnotify.Watcher // watch the checkpoint file. update the chart and metric map when check point file changed
 
 	podMap  map[string]PodInfo
 	preMap  map[string]string // use to update the chart
+	vfMap   map[int]string    // key:vfIndex, value: mlx5_xxxx
 	vfCount int
 
 	CheckPoint     string `yaml:"check_point"`
@@ -86,6 +89,9 @@ func (pt *PodTraffic) Init() bool {
 		logger.Errorln("error when read the checkpoint file:", err)
 		return false
 	}
+	if !pt.getVFDir() {
+		return false
+	}
 	pt.preMap = make(map[string]string)
 	for key, podInfo := range pt.podMap {
 		if podInfo.VfIndex == -1 {
@@ -95,9 +101,26 @@ func (pt *PodTraffic) Init() bool {
 		}
 	}
 	go pt.WatchCheckPoint()
-	if err := pt.getTraffic(); err != nil {
-		logger.Errorln(err)
-		return false
+	return true
+}
+
+func (pt *PodTraffic) getVFDir() bool {
+	pt.vfMap = make(map[int]string)
+	for _, podInfo := range pt.podMap {
+		if podInfo.VfIndex == -1 {
+			continue
+		}
+		cmdStr := fmt.Sprintf("lspci|grep Mell|grep Virtual|sed -n '%dp'|awk '{print $1}'", podInfo.VfIndex+1)
+		pciAddr, err := pt.Exec(cmdStr)
+		if err != nil {
+			return false
+		}
+		cmdStr = fmt.Sprintf("ls /sys/class/infiniband/ -alh|grep \"%s\"|awk '{print $9}'", strings.TrimSpace(pciAddr))
+		dirName, err := pt.Exec(cmdStr)
+		if err != nil {
+			return false
+		}
+		pt.vfMap[podInfo.VfIndex] = fmt.Sprintf("cat /sys/class/infiniband/%s/ports/1/counters/", strings.TrimSpace(dirName))
 	}
 	return true
 }
@@ -111,8 +134,8 @@ func (pt *PodTraffic) ReadCheckPoint() error {
 	if err != nil {
 		return err
 	}
-	pt.mutex.Lock()
-	defer pt.mutex.Unlock()
+	pt.mapMutex.Lock()
+	defer pt.mapMutex.Unlock()
 	pt.podMap = make(map[string]PodInfo)
 	err = json.Unmarshal(data, &pt.podMap)
 	if err != nil {
@@ -128,40 +151,39 @@ func (pt *PodTraffic) ReadCheckPoint() error {
 }
 
 func (pt *PodTraffic) RefreshCharts() {
-	var success bool
-	var retry = 10
-	var count int
-	for !success && count < retry {
-		for key, podInfo := range pt.podMap {
-			name := podInfo.HostVeth + "-" + strconv.Itoa(podInfo.VfIndex)
-			if _, exists := pt.preMap[key]; !exists {
-				var err error
-				if podInfo.VfIndex == -1 {
-					err = pt.dynamicCharts.Add(*newVethPairTrafficCharts(name)...)
-				} else {
-					err = pt.dynamicCharts.Add(*newVFTrafficCharts(name)...)
-				}
-				if err != nil {
-					logger.Errorln("error when add the chart:", name, err)
-					count++
-					continue
-				}
-				success = true
+	for key, podInfo := range pt.podMap {
+		name := podInfo.HostVeth + "-" + strconv.Itoa(podInfo.VfIndex)
+		if _, exists := pt.preMap[key]; !exists {
+			var err error
+			if podInfo.VfIndex == -1 {
+				err = pt.dynamicCharts.Add(*newVethPairTrafficCharts(name)...)
+			} else {
+				err = pt.dynamicCharts.Add(*newVFTrafficCharts(name)...)
+			}
+			if err != nil {
+				logger.Errorln("error when add the chart:", name, err)
 			}
 		}
 	}
-	if !success {
-		logger.Errorln("add chart failed after retry 10 times!")
-	}
 	for key, chartID := range pt.preMap {
 		if _, exists := pt.podMap[key]; !exists {
-			pt.mutex.Lock()
+			pt.metricMutex.Lock()
 			delete(pt.metrics, chartID+"-Recv")
 			delete(pt.metrics, chartID+"-Send")
-			chartID = strings.Replace(chartID, "-", "_", -1)
-			(*pt.dynamicCharts).Get(chartID).MarkRemove()
-			(*pt.dynamicCharts).Get(chartID).MarkNotCreated()
-			pt.mutex.Unlock()
+			pt.metricMutex.Unlock()
+			// chartID = strings.Replace(chartID, "-", "_", -1)
+			chart := (*pt.dynamicCharts).Get(chartID)
+			if chart != nil {
+				chart.MarkRemove()
+				chart.MarkNotCreated()
+			}
+			if len(strings.Split(chartID, "-")) > 1 {
+				chart := (*pt.dynamicCharts).Get("RDMA-" + chartID)
+				if chart != nil {
+					chart.MarkRemove()
+					chart.MarkNotCreated()
+				}
+			}
 		}
 	}
 	pt.preMap = make(map[string]string)
@@ -186,6 +208,7 @@ func (pt *PodTraffic) WatchCheckPoint() {
 				if ev.Op&fsnotify.Write == fsnotify.Write {
 					logger.Infoln("the file has been updated!")
 					pt.ReadCheckPoint()
+					pt.getVFDir()
 					pt.RefreshCharts()
 				}
 			}
@@ -206,31 +229,33 @@ func (pt *PodTraffic) Check() bool {
 // Charts creates Charts
 func (pt *PodTraffic) Charts() *module.Charts {
 	PodTrafficCharts := &Charts{}
-	for key, _ := range pt.metrics {
-		if key == "vfCount" {
-			vfch := vfCountCharts.Copy()
-			dim := &Dim{ID: "vfCount", Name: "VF Count"}
-			if err := vfch.Get("VFCount").AddDim(dim); err != nil {
-				logger.Errorln("Error when create chart for vf:", err)
-				return nil
-			}
-			err := PodTrafficCharts.Add(*vfch...)
+	pt.mapMutex.Lock()
+	defer pt.mapMutex.Unlock()
+	for _, podInfo := range pt.podMap {
+		if podInfo.VfIndex == -1 {
+			err := PodTrafficCharts.Add(*newVethPairTrafficCharts(podInfo.HostVeth)...)
 			if err != nil {
-				logger.Errorln("Error when add vf charts:", err)
+				logger.Errorln("Error when add veth pair traffic chart:", err)
 			}
 		} else {
-			if len(strings.Split(key, "-")) == 3 {
-				err := PodTrafficCharts.Add(*newVFTrafficCharts(key)...)
-				if err != nil {
-					logger.Errorln("Error when add vf traffic chart:", err)
-				}
-			} else {
-				err := PodTrafficCharts.Add(*newVethPairTrafficCharts(key)...)
-				if err != nil {
-					logger.Errorln("Error when add veth pair traffic chart:", err)
-				}
+			key := podInfo.HostVeth + "-" + strconv.Itoa(podInfo.VfIndex)
+			err := PodTrafficCharts.Add(*newVFTrafficCharts(key)...)
+			if err != nil {
+				logger.Errorln("Error when add vf traffic chart:", err)
+
 			}
 		}
+	}
+	// add vf count chart
+	vfch := vfCountCharts.Copy()
+	dim := &Dim{ID: "vfCount", Name: "VF Count"}
+	if err := vfch.Get("VFCount").AddDim(dim); err != nil {
+		logger.Errorln("Error when create chart for vf:", err)
+		return nil
+	}
+	err := PodTrafficCharts.Add(*vfch...)
+	if err != nil {
+		logger.Errorln("Error when add vf charts:", err)
 	}
 	pt.dynamicCharts = PodTrafficCharts
 	return PodTrafficCharts
@@ -238,81 +263,115 @@ func (pt *PodTraffic) Charts() *module.Charts {
 
 // Collect collects metrics
 func (pt *PodTraffic) Collect() map[string]int64 {
-	err := pt.getTraffic()
-	if err != nil {
-		logger.Errorln("Error when get traffic: ", err)
-		return nil
+	pt.mapMutex.Lock()
+	defer pt.mapMutex.Unlock()
+	for _, podInfo := range pt.podMap {
+		if podInfo.VfIndex == -1 {
+			go pt.GetVethTraffic(podInfo.HostVeth)
+		} else {
+			go pt.GetVfTraffic(podInfo.HostVeth, podInfo.VfIndex)
+		}
 	}
+	// err := pt.getTraffic()
+	// if err != nil {
+	// logger.Errorln("Error when get traffic: ", err)
+	// return nil
+	// }
+	pt.metrics["vfCount"] = int64(pt.vfCount)
 	return pt.metrics
 }
 
-func (pt *PodTraffic) getTraffic() error {
-	var outterErr error
-	var wg sync.WaitGroup
-	for _, podInfo := range pt.podMap {
-		wg.Add(1)
-		if podInfo.VfIndex == -1 {
-			go func(portName string) {
-				defer wg.Done()
-				var recvPrefix = portName + "-Recv"
-				var sendPrefix = portName + "-Send"
-				pt.mutex.Lock()
-				defer pt.mutex.Unlock()
-				cmdStr := fmt.Sprintf("cat /sys/class/net/%s/statistics/rx_bytes", portName)
-				data := pt.Exec(cmdStr)
-				if data == "" {
-					return
-				}
-				count, err := strconv.Atoi(strings.TrimSpace(strings.Trim(data, "\n")))
-				if err != nil {
-					outterErr = err
-					return
-				}
-				pt.metrics[sendPrefix] = int64(count)
-
-				// handle the send
-				cmdStr = fmt.Sprintf("cat /sys/class/net/%s/statistics/tx_bytes", portName)
-				data = pt.Exec(cmdStr)
-				if data == "" {
-					return
-				}
-				count, err = strconv.Atoi(strings.TrimSpace(strings.Trim(data, "\n")))
-				if err != nil {
-					outterErr = err
-					return
-				}
-
-				pt.metrics[recvPrefix] = int64(count)
-			}(podInfo.HostVeth)
-		} else {
-			go func(portName string, vfIndex int) {
-				defer wg.Done()
-				stats, err := pt.ethHandler.Stats(portName)
-				if err != nil {
-					outterErr = err
-					return
-				}
-				pt.mutex.Lock()
-				defer pt.mutex.Unlock()
-				var prefix = portName + "-" + strconv.Itoa(vfIndex) + "-"
-				pt.metrics[prefix+"Recv"] = int64(stats["vport_tx_bytes"])
-				pt.metrics[prefix+"Send"] = int64(stats["vport_rx_bytes"])
-			}(podInfo.HostVeth, podInfo.VfIndex)
-		}
+func (pt *PodTraffic) GetVethTraffic(portName string) {
+	var recvPrefix = portName + "-Recv"
+	var sendPrefix = portName + "-Send"
+	pt.metricMutex.Lock()
+	defer pt.metricMutex.Unlock()
+	cmdStr := fmt.Sprintf("cat /sys/class/net/%s/statistics/rx_bytes", portName)
+	data, err := pt.Exec(cmdStr)
+	if err != nil {
+		logger.Errorf("Error when read the counter for veth %s:%s", portName, err)
 	}
-	wg.Wait()
-	pt.metrics["vfCount"] = int64(pt.vfCount)
-	return outterErr
+	count, err := strconv.Atoi(strings.TrimSpace(strings.Trim(data, "\n")))
+	if err != nil {
+		logger.Errorf("Error when convert the counter for veth %s:%s", portName, err)
+	}
+	pt.metrics[sendPrefix] = int64(count)
+
+	// handle the send
+	cmdStr = fmt.Sprintf("cat /sys/class/net/%s/statistics/tx_bytes", portName)
+	data, err = pt.Exec(cmdStr)
+	if err != nil {
+		logger.Errorf("Error when read the counter for veth %s:%s", portName, err)
+	}
+	count, err = strconv.Atoi(strings.TrimSpace(strings.Trim(data, "\n")))
+	if err != nil {
+		logger.Errorf("Error when convert the counter for veth %s:%s", portName, err)
+	}
+
+	pt.metrics[recvPrefix] = int64(count)
 }
 
-func (pt *PodTraffic) Exec(cmdStr string) string {
+func (pt *PodTraffic) GetVfTraffic(portName string, vfIndex int) {
+	go func(portName string, vfIndex int) {
+		stats, err := pt.ethHandler.Stats(portName)
+		if err != nil {
+			logger.Errorf("Error when get stats for port:%s by ethtool", portName)
+		}
+		pt.metricMutex.Lock()
+		defer pt.metricMutex.Unlock()
+		var prefix = portName + "-" + strconv.Itoa(vfIndex) + "-"
+		pt.metrics[prefix+"Recv"] = int64(stats["vport_tx_bytes"])
+		pt.metrics[prefix+"Send"] = int64(stats["vport_rx_bytes"])
+	}(portName, vfIndex)
+	go func(portName string, vfIndex int) {
+		var prefix = portName + "-" + strconv.Itoa(vfIndex) + "-" + "RDMA-"
+		metric, err := pt.Exec(pt.vfMap[vfIndex] + "port_rcv_data")
+		if err != nil {
+			logger.Errorf("Error when get rdma counter for port:%s", portName)
+			return
+		}
+		data, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(metric, "\n")))
+		if err != nil {
+			logger.Errorf("Error when convert rdma counter for port:%s", portName)
+			return
+		}
+		pt.metricMutex.Lock()
+		defer pt.metricMutex.Unlock()
+		pt.metrics[prefix+"Recv"] = int64(data)
+		metric, err = pt.Exec(pt.vfMap[vfIndex] + "port_xmit_data")
+		if err != nil {
+			logger.Errorf("Error when get rdma counter for port:%s", portName)
+			return
+		}
+		data, err = strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(metric, "\n")))
+		if err != nil {
+			logger.Errorf("Error when convert rdma counter for port:%s", portName)
+			return
+		}
+		pt.metrics[prefix+"Send"] = int64(data)
+	}(portName, vfIndex)
+}
+
+// func (pt *PodTraffic) getTraffic() error {
+// var outterErr error
+// for _, podInfo := range pt.podMap {
+// if podInfo.VfIndex == -1 {
+// go func(portName string) {
+// }(podInfo.HostVeth)
+// } else {
+// }
+// }
+// return outterErr
+// }
+
+func (pt *PodTraffic) Exec(cmdStr string) (string, error) {
 	cmd := exec.Command("/bin/bash", "-c", cmdStr)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
 		logger.Errorf("Error when execute the command %s. Error info is: %v\n", cmdStr, err)
-		return ""
+		return "", err
 	}
-	return out.String()
+	return out.String(), nil
 }

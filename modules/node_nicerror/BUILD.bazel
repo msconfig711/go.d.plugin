@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "charts.go",
+        "nicerror.go",
+    ],
+    importpath = "go.megvii-inc.com/brain/infra-monitor/netdata-tools/go.d.plugin/modules/node_nicerror",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_msconfig711_ethtool//:go_default_library",
+        "@netdata_go_orchestrator//module:go_default_library",
+    ],
+)

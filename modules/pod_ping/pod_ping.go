@@ -41,9 +41,10 @@ func New() *PodPing {
 		logger.Errorln("Error when init watcher handler! ", err)
 	}
 	return &PodPing{
-		metrics: make(map[string]int64),
-		watcher: watcher,
-		mutex:   sync.Mutex{},
+		metrics:     make(map[string]int64),
+		watcher:     watcher,
+		metricMutex: sync.Mutex{},
+		mapMutex:    sync.Mutex{},
 	}
 }
 
@@ -52,12 +53,13 @@ type PodPing struct {
 	metrics     map[string]int64
 	CheckPoint  string `yaml:"check_point"`
 
-	mutex         sync.Mutex
+	metricMutex   sync.Mutex
+	mapMutex      sync.Mutex
 	watcher       *fsnotify.Watcher
 	nodeIP        []string
 	hostIP        string // the ip address of the host0
 	podMap        map[string]PodInfo
-	preMap        map[string]string // value: pod ip
+	preMap        map[string]string // key: same as podMap key(containerID), value: pod ip
 	dynamicCharts *module.Charts
 }
 
@@ -96,6 +98,8 @@ func (pp *PodPing) ReadCheckPoint() {
 		logger.Errorln("read checkoutpoint file failed", err)
 		return
 	}
+	pp.mapMutex.Lock()
+	defer pp.mapMutex.Unlock()
 	pp.podMap = make(map[string]PodInfo)
 	err = json.Unmarshal(data, &pp.podMap)
 	if err != nil {
@@ -105,30 +109,42 @@ func (pp *PodPing) ReadCheckPoint() {
 }
 
 func (pp *PodPing) RefreshCharts() {
+	pp.mapMutex.Lock()
+	defer pp.mapMutex.Unlock()
 	for key, podInfo := range pp.podMap {
 		if _, exists := pp.preMap[key]; !exists {
-			err := pp.dynamicCharts.Add(*newPingLossCharts("pod", podInfo.IP)...)
+			ip := strings.Replace(podInfo.IP, ".", "_", -1)
+			err := pp.dynamicCharts.Add(*newPingLossCharts("pod", ip)...)
 			if err != nil {
-				logger.Errorln("Error when add the ping loss chart:", podInfo.IP, err)
+				logger.Errorln("Error when add the ping loss chart:", ip, err)
+			}
+			err = pp.dynamicCharts.Add(*newPingLatencyCharts("pod", ip)...)
+			if err != nil {
+				logger.Errorln("Error when add the ping loss chart:", ip, err)
 			}
 		}
 	}
 	for key, ip := range pp.preMap {
 		if _, exists := pp.podMap[key]; !exists {
-			pp.mutex.Lock()
+			pp.metricMutex.Lock()
 			ip = strings.Replace(ip, ".", "_", -1)
 			delete(pp.metrics, ip+"-loss")
 			delete(pp.metrics, ip+"-maximum")
 			delete(pp.metrics, ip+"-minimum")
 			delete(pp.metrics, ip+"-average")
-			(*pp.dynamicCharts).Get(ip + "-loss").MarkRemove()
-			(*pp.dynamicCharts).Get(ip + "-loss").MarkNotCreated()
-			(*pp.dynamicCharts).Get(ip + "-latency").MarkRemove()
-			(*pp.dynamicCharts).Get(ip + "-latency").MarkNotCreated()
-			pp.mutex.Unlock()
+			pp.metricMutex.Unlock()
+			chart := (*pp.dynamicCharts).Get(ip + "-loss")
+			if chart != nil {
+				chart.MarkRemove()
+				chart.MarkNotCreated()
+			}
+			chart = (*pp.dynamicCharts).Get(ip + "-latency")
+			if chart != nil {
+				chart.MarkRemove()
+				chart.MarkNotCreated()
+			}
 		}
 	}
-
 	pp.preMap = make(map[string]string)
 	for key, podInfo := range pp.podMap {
 		pp.preMap[key] = podInfo.IP
@@ -167,8 +183,8 @@ func (pp *PodPing) Check() bool {
 // Charts creates Charts
 func (pp *PodPing) Charts() *module.Charts {
 	charts := &Charts{}
-	pp.mutex.Lock()
-	defer pp.mutex.Unlock()
+	pp.mapMutex.Lock()
+	defer pp.mapMutex.Unlock()
 	for _, podInfo := range pp.podMap {
 		ip := strings.Replace(podInfo.IP, ".", "_", -1)
 		charts.Add(*newPingLossCharts("pod", ip)...)
@@ -185,11 +201,13 @@ func (pp *PodPing) Charts() *module.Charts {
 
 // Collect collects metrics
 func (pp *PodPing) Collect() map[string]int64 {
-	for _, podInfo := range pp.podMap {
-		go pp.ping(podInfo.IP)
+	pp.mapMutex.Lock()
+	for key, podInfo := range pp.podMap {
+		go pp.ping(podInfo.IP, key)
 	}
+	pp.mapMutex.Unlock()
 	for _, nodeIP := range pp.nodeIP {
-		go pp.ping(nodeIP)
+		go pp.ping(nodeIP, "node")
 	}
 	return pp.metrics
 }
@@ -238,19 +256,27 @@ func (pp *PodPing) getHostIP() error {
 	return nil
 }
 
-func (pp *PodPing) ping(ip string) {
+func (pp *PodPing) ping(ip, key string) {
 	metricKey := strings.Replace(ip, ".", "_", -1)
-	pp.mutex.Lock()
-	defer pp.mutex.Unlock()
 	pinger, err := ping.NewPinger(ip)
 	if err != nil {
 		return
 	}
 	pinger.Source = pp.hostIP
 	pinger.Count = 5
-	pinger.Timeout = time.Duration(pinger.Count) * 2 * time.Second
+	pinger.Timeout = time.Duration(pinger.Count) * time.Second
 	pinger.OnFinish = func(stats *ping.Statistics) {
-		pp.metrics[metricKey+"-loss"] = int64(100 - stats.PacketLoss*100)
+		pp.metricMutex.Lock()
+		defer pp.metricMutex.Unlock()
+		if key != "node" {
+			// means the metric has beed deleted by RefreshCharts function
+			pp.mapMutex.Lock()
+			defer pp.mapMutex.Unlock()
+			if _, exists := pp.podMap[key]; !exists {
+				return
+			}
+		}
+		pp.metrics[metricKey+"-loss"] = int64(100 - stats.PacketLoss)
 		pp.metrics[metricKey+"-maximum"] = int64(float64(stats.MaxRtt) / float64(time.Millisecond) * 1000)
 		pp.metrics[metricKey+"-minimum"] = int64(float64(stats.MinRtt) / float64(time.Millisecond) * 1000)
 		pp.metrics[metricKey+"-average"] = int64(float64(stats.AvgRtt) / float64(time.Millisecond) * 1000)
